@@ -1,0 +1,420 @@
+---
+title: "Early COVID-19 cases analysis"
+output:
+  html_document: default
+  pdf_document:
+    latex_engine: xelatex
+    geometry: margin=1in
+--- 
+## Introduction
+
+This project analyzes early COVID-19 imported cases in China using publicly
+reported case-level data. The goal is to perform a descriptive epidemiological
+analysis and a delay analysis between key events such as symptom onset,
+hospitalization, and reporting. Special attention is given to factors associated with mortality, including age, gender, and exposure to Wuhan.
+
+## 1. Setup and data loading
+
+```{r setup}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(broom)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(sf)
+library(viridis)
+```
+
+```{r}
+# load data
+covid_data <- read_csv("covid19_data.csv")
+head(covid_data)
+```
+
+```{r}
+summary(covid_data)
+```
+
+```{r}
+colSums(is.na(covid_data))
+```
+
+## 2. Data cleaning and preparation
+The original dataset contained redundant columns, missing values, and inconsistent date formats. Variables were standardized, dates were converted to a uniform format, and derived variables were created, such as delays between symptom onset, hospitalization, and reporting. The province was extracted from the “location” column and major Chinese municipalities were standardized to ensure consistency for geographic analyses.
+
+
+```{r}
+covid_clean <- covid_data %>%
+  # remove empty columns (22-27)
+  select(-starts_with("...")) %>%
+  rename(
+    reporting_date = `reporting date`,
+    visiting_wuhan = `visiting Wuhan`,
+    from_wuhan     = `from Wuhan`
+  ) %>%
+  mutate(
+    death          = as.numeric(death),
+    recovered      = as.numeric(recovered),
+    visiting_wuhan = as.numeric(visiting_wuhan),
+    from_wuhan     = as.numeric(from_wuhan),
+    reporting_date = parse_date_time(reporting_date, orders = c("m/d/Y", "m/d/y")),
+    hosp_visit_date = parse_date_time(hosp_visit_date, orders = c("m/d/Y", "m/d/y")),
+    symptom_onset = parse_date_time(symptom_onset, orders = c("m/d/Y", "m/d/y")),
+    exposure_start = parse_date_time(exposure_start, orders = c("m/d/Y", "m/d/y")),
+    exposure_end = parse_date_time(exposure_end, orders = c("m/d/Y", "m/d/y"))
+  )
+
+```
+
+```{r}
+# count the cases by symptom onset date
+covid_clean %>%
+  filter(!is.na(symptom_onset)) %>%
+  count(symptom_onset, sort = TRUE)
+
+# check that the dates are consistent and readable.
+covid_clean %>%
+  filter(!is.na(symptom_onset)) %>%
+  distinct(symptom_onset) %>%
+  head(20)
+
+```
+```{r}
+glimpse(covid_clean)
+colSums(is.na(covid_clean))
+```
+
+## 3. Exploratory Data Analysis (EDA)
+
+Daily case counts were visualized according to symptom onset dates. The analysis shows early peaks in the initial days of the outbreak, highlighting the start of local transmission. Temporal patterns provide an initial understanding of the speed of spread and periods of higher incidence.
+
+```{r}
+covid_clean %>%
+  filter(!is.na(symptom_onset)) %>%
+  count(symptom_onset) %>%
+  ggplot(aes(x = symptom_onset, y = n)) +
+  geom_line(color = "steelblue") +
+  geom_point(color = "red") +
+  labs(title = "Number of cases per day of symptom onset",
+       x = "Date of symptom onset",
+       y = "Number of cases") +
+  theme_minimal()
+
+```
+The distribution of cases by gender shows a slight predominance of males. Age distribution indicates that most cases occurred in adults, with few cases among children and adolescents. These patterns are consistent with observations from the early epidemic phase and provide important context for mortality analysis.
+
+```{r}
+gender_colors <- c(
+  "female" = "#F8766D",  
+  "male"   = "#00BFC4"   
+)
+
+covid_clean %>%
+  filter(!is.na(gender)) %>%
+  count(gender) %>%
+  ggplot(aes(x = gender, y = n, fill = gender)) +
+  geom_col() +
+  scale_fill_manual(values = gender_colors) +
+  labs(
+    title = "Distribution of cases by gender",
+    x = "Gender",
+    y = "Number of cases"
+  ) +
+  theme_minimal() +
+  guides(fill = "none")  
+
+covid_clean %>%
+  filter(!is.na(age), !is.na(gender)) %>%
+  ggplot(aes(x = age, fill = gender)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = gender_colors) +
+  labs(
+    title = "Age distribution by gender",
+    x = "Age",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+```
+
+Aggregated international data highlight countries with the highest number of imported cases. This visualization helps contextualize imported cases in China relative to global spread and provides insights into early international transmission patterns.
+
+
+```{r}
+# Count the number of cases per country
+cases_by_country <- covid_clean %>%
+  group_by(country) %>%
+  summarise(total_cases = n()) %>%
+  arrange(desc(total_cases))
+
+head(cases_by_country, 10)
+```
+
+```{r}
+# Count the number of cases per country
+cases_by_country <- covid_clean %>%
+  group_by(country) %>%
+  summarise(total_cases = n()) %>%
+  arrange(desc(total_cases))
+
+head(cases_by_country, 10)
+
+
+ggplot(cases_by_country, aes(x = reorder(country, -total_cases), y = total_cases)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Distribution of COVID-19 cases by country",
+       x = "Country",
+       y = "Number of cases") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+Aggregated international data highlight countries with the highest number of imported cases. This visualization helps contextualize imported cases in China relative to global spread and provides insights into early international transmission patterns.
+
+```{r}
+
+# Count daily cases by country
+daily_cases <- covid_clean %>%
+  group_by(country, reporting_date) %>%
+  summarise(daily_cases = n(), .groups = "drop") %>%
+  arrange(country, reporting_date)
+
+# Select the most significant countries by total number of cases
+top_countries <- covid_clean %>%
+  group_by(country) %>%
+  summarise(total_cases = n(), .groups = "drop") %>%
+  arrange(desc(total_cases)) %>%
+  slice_head(n = 6) %>%   # top 6 countries
+  pull(country)
+
+daily_cases_top <- daily_cases %>%
+  filter(country %in% top_countries)
+
+# Cumulative cases
+cumulative_cases_top <- daily_cases_top %>%
+  group_by(country) %>%
+  arrange(reporting_date) %>%
+  mutate(cumulative_cases = cumsum(daily_cases))
+
+```
+
+```{r}
+ggplot(cumulative_cases_top, aes(x = reporting_date, y = cumulative_cases, color = country)) +
+  geom_line(size = 1.2) +
+  scale_x_date(date_labels = "%d-%b-%Y", date_breaks = "1 week") +
+  labs(title = "Cumulative COVID-19 cases by country (Top 6))",
+       x = "Date (gg-mm-aaaa)",
+       y = "Cumulative cases") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+```
+
+Geographic Distribution in China (Map)
+The map shows the distribution of confirmed cases across Chinese provinces. 
+```{r}
+# Function to standardize the names of the provinces
+province_clean <- function(x) {
+  x <- trimws(x)
+  x <- case_when(
+    x %in% c("Beijing") ~ "Beijing Municipality",
+    x %in% c("Shanghai") ~ "Shanghai Municipality",
+    x %in% c("Tianjin") ~ "Tianjin Municipality",
+    x %in% c("Chongqing") ~ "Chongqing Municipality",
+    x %in% c("Macau") ~ "Macau",
+    x %in% c("Inner Mongolia") ~ "Inner Mongolia",
+    x %in% c("Shanxi (陕西)") ~ "Shaanxi",
+    TRUE ~ x
+  )
+  return(x)
+}
+
+# Extract province from location column
+covid_data <- covid_data %>%
+  mutate(
+    province = if_else(grepl(",", location), 
+                       sapply(strsplit(location, ","), `[`, 2), 
+                       location),
+    province = province_clean(province)
+  )
+```
+
+
+```{r}
+# Aggregate cases by province
+cases_by_province <- covid_data %>%
+  filter(!is.na(province)) %>%
+  group_by(province) %>%
+  summarise(total_cases = n(), .groups = "drop")
+
+
+# Reading GADM shapefiles
+china_map <- st_read("gadm41_CHN_shp/gadm41_CHN_1.shp")  # level 1: province
+
+map_data <- china_map %>%
+  left_join(cases_by_province, by = c("NAME_1" = "province"))
+
+```
+
+```{r}
+ggplot(map_data) +
+  geom_sf(aes(fill = total_cases), color = "white") +
+  scale_fill_viridis_c(option = "plasma", na.value = "grey90") +
+  labs(title = "Distribution of COVID-19 cases by province in China",
+       fill = "Total cases") +
+  theme_minimal() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+```
+
+The most affected provinces include major urban centers and areas close to Wuhan, while remote provinces have significantly fewer cases.
+
+```{r}
+# Number of imported cases from Wuhan and visitors
+covid_clean %>%
+  summarise(
+    visiting_wuhan = sum(visiting_wuhan, na.rm = TRUE),
+    from_wuhan    = sum(from_wuhan, na.rm = TRUE),
+    local_cases   = n() - visiting_wuhan - from_wuhan #Some cases may overlap conceptually, 
+    #but categories are used descriptively based on available binary indicators.
+  ) %>%
+  pivot_longer(everything(), names_to = "tipo", values_to = "n") %>%
+  ggplot(aes(x = tipo, y = n, fill = tipo)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Imported cases from Wuhan vs. local cases", x = "", y = "Number of cases") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+```
+The "imported" cases (from/visiting Wuhan) were relatively few compared to the total.
+The majority of cases were "local cases": local transmission, without a direct link to Wuhan.
+
+```{r}
+# Number of deaths and recoveries
+covid_clean %>%
+  summarise(
+    death     = sum(death, na.rm = TRUE),
+    recovered = sum(recovered, na.rm = TRUE)
+  ) %>%
+  pivot_longer(everything(), names_to = "outcome", values_to = "n") %>%
+  ggplot(aes(x = outcome, y = n, fill = outcome)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Case outcomes", x = "", y = "Number of cases") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1")
+```
+
+## Delay Analysis
+This step analyzes the delays between key events: symptom onset → hospitalization → reporting.
+We calculate summary statistics and visualize distributions to understand how quickly cases were identified and reported.
+
+Most cases were hospitalized shortly after symptom onset, while official reporting often took longer. Some negative delays are present due to recording errors and are noted as a data quality limitation. Analyzing these delays helps understand the efficiency of case detection and reporting in the early epidemic phase.
+
+```{r}
+covid_delays <- covid_clean %>%
+  filter(!is.na(symptom_onset) & !is.na(hosp_visit_date) & !is.na(reporting_date)) %>%
+  mutate(
+    onset_to_hosp   = as.numeric(hosp_visit_date - symptom_onset, units = "days"),
+    hosp_to_report  = as.numeric(reporting_date - hosp_visit_date, units = "days"),
+    onset_to_report = as.numeric(reporting_date - symptom_onset, units = "days")
+  )
+```
+
+```{r}
+summary(covid_delays %>% select(onset_to_hosp, hosp_to_report, onset_to_report))
+```
+Some calculated delays (e.g., symptom onset → hospital visit) are negative due to inconsistencies or errors in the original dataset. These values are not epidemiologically plausible, so we exclude them from the plots to show realistic distributions. Negative delays are still acknowledged in the text as a note on data quality.
+
+```{r}
+ggplot(covid_delays %>% filter(onset_to_hosp >= 0), 
+       aes(x = onset_to_hosp)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "white") +
+  labs(title = "Delay: Symptom Onset → Hospital Visit",
+       x = "Days",
+       y = "Number of cases")
+```
+
+```{r}
+ggplot(covid_delays, aes(x = hosp_to_report)) +
+  geom_histogram(binwidth = 1, fill = "darkgreen", color = "white") +
+  labs(title = "Delay: Hospital Visit → Reporting Date", x = "Days", y = "Number of cases")
+```
+
+```{r}
+ggplot(covid_delays, aes(x = onset_to_report)) +
+  geom_histogram(binwidth = 1, fill = "orange", color = "white") +
+  labs(title = "Delay: Symptom Onset → Reporting Date", x = "Days", y = "Number of cases")
+```
+
+## Step 5: Mortality analysis
+This step explores factors associated with death among confirmed cases.
+A logistic regression model was fitted to explore factors associated with death. Age, gender, delay to hospitalization, and Wuhan-related exposure were included as predictors.
+
+```{r}
+mortality_model <- glm(
+  death ~ age + gender + onset_to_hosp + from_wuhan,
+  data = covid_delays,
+  family = binomial
+)
+```
+
+```{r}
+summary(mortality_model)
+```
+Controlling for age, males have a higher probability of death than females. 
+Direct exposure to Wuhan further increases the risk of mortality. 
+
+
+```{r}
+mortality_tidy <- tidy(mortality_model, conf.int = TRUE)
+mortality_or <- mortality_tidy %>%
+  mutate(
+    OR = exp(estimate),
+    OR_low = exp(conf.low),
+    OR_high = exp(conf.high)
+  )
+
+ggplot(mortality_or %>% filter(term != "(Intercept)"),
+       aes(x = term, y = OR)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = OR_low, ymax = OR_high), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  scale_y_log10() +
+  labs(
+    title = "Odds ratios for mortality (log scale)",
+    x = "",
+    y = "Odds Ratio (log scale)"
+  ) +
+  theme_minimal()
+
+
+```
+The very large odds ratio associated with being from Wuhan likely reflects the early epidemic context, where cases linked to Wuhan were more severe and more likely to be detected if fatal. This association should therefore be interpreted as contextual rather than causal.
+Male gender was also a strong risk factor, with an odds ratio of about 6.5, indicating that men had a substantially higher likelihood of death than women at the same age and with the same other conditions. This finding is consistent with existing scientific evidence showing worse outcomes among male patients with COVID-19, particularly in critically ill populations ([Premraj et al., 2024](https://doi.org/10.1016/j.hrtlng.2024.09.001)
+).
+Age had a moderate effect, with each additional year increasing the odds of death by roughly 10%. Finally, longer delays between symptom onset and hospitalization were associated with higher mortality, with each additional day increasing the risk by approximately 26%.
+
+```{r}
+mortality_model_interaction <- glm(
+  death ~ age * gender + onset_to_hosp + from_wuhan,
+  data = covid_delays,
+  family = binomial
+)
+
+summary(mortality_model_interaction)
+
+```
+The interaction between age and gender was not significant, suggesting that the increase in risk with age is similar for both sexes. Therefore, the simpler model without interaction is considered the most appropriate to describe the data.
+
+The non-significant age–gender interaction indicates that the increase in mortality risk with age is parallel in men and women, rather than steeper in one sex.
+
+## Step 6: Limitations
+- High proportion of missing values for key dates;
+- Possible reporting errors leading to negative delays
+- Early epidemic data may not be representative of later transmission dynamics
+- Mortality analysis limited by low number of observed deaths
+- Results should be interpreted cautiously due to the limited number of deaths and missing data.
